@@ -180,6 +180,16 @@ def create_styled_pdf_bytes(data):
 def upload_pdf_to_drive(filename, pdf_bytes):
     try:
         _, drive_service = get_google_clients()
+        
+        # フォルダの権限を確認
+        try:
+            folder_info = drive_service.files().get(
+                fileId=DRIVE_FOLDER_ID,
+                fields="name, capabilities"
+            ).execute()
+        except Exception as folder_err:
+            return None, f"フォルダアクセスエラー: {folder_err}\n\n→ フォルダにサービスアカウントを「編集者」として共有してください"
+        
         file_metadata = {
             "name": filename,
             "parents": [DRIVE_FOLDER_ID]
@@ -192,7 +202,10 @@ def upload_pdf_to_drive(filename, pdf_bytes):
         ).execute()
         return uploaded.get("webViewLink"), None
     except Exception as e:
-        return None, str(e)
+        error_msg = str(e)
+        if "403" in error_msg or "quota" in error_msg.lower():
+            return None, "❌ 権限エラー: Google Driveのフォルダにサービスアカウント（xxxx@xxxx.iam.gserviceaccount.com）を「編集者」として共有してください"
+        return None, f"Drive保存エラー: {error_msg}"
 
 # --- 認証機能 ---
 def check_password():
