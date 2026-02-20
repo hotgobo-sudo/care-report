@@ -20,11 +20,11 @@ from googleapiclient.http import MediaIoBaseUpload
 # --- 設定項目 ---
 PASSWORD = "care1234"
 FONT_NAME = 'JP-Font'
-FONT_PATH = 'msmincho.ttc'
+FONT_PATH = 'msmincho.ttc'  # ※GitHubのリポジトリにこのファイルがあることを確認してください
 
 # Streamlit Secrets から取得
 SPREADSHEET_ID = st.secrets["SPREADSHEET_ID"]
-DRIVE_FOLDER_ID = st.secrets["DRIVE_FOLDER_ID"] 
+DRIVE_FOLDER_ID = st.secrets["DRIVE_FOLDER_ID"]
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -42,11 +42,15 @@ def get_google_clients():
     drive_service = build('drive', 'v3', credentials=creds)
     return gc, drive_service
 
-# --- フォント登録 ---
+# --- フォント登録（修正済み） ---
 if os.path.exists(FONT_PATH):
-    pdfmetrics.registerFont(TTFont(FONT_NAME, FONT_PATH))
+    try:
+        # 【修正！】.ttc ファイルの場合は subfontIndex を指定します
+        pdfmetrics.registerFont(TTFont(FONT_NAME, FONT_PATH, subfontIndex=0))
+    except Exception as e:
+        st.error(f"フォント登録エラー: {e}")
 else:
-    st.error(f"【重要】'{FONT_PATH}' が見つかりません。")
+    st.error(f"【重要】フォントファイル '{FONT_PATH}' が見つかりません。GitHubにアップロードされているか確認してください。")
 
 # --- 履歴管理（Google Sheets） ---
 def save_history(name, data):
@@ -55,9 +59,12 @@ def save_history(name, data):
         sh = gc.open_by_key(SPREADSHEET_ID)
         ws = sh.worksheet("care_history")
         row = [
-            name, data["date"], data["author"],
+            name,
+            data["date"],
+            data["author"],
             json.dumps(data["items"], ensure_ascii=False),
-            data["progress"], datetime.now().strftime("%Y/%m/%d %H:%M:%S")
+            data["progress"],
+            datetime.now().strftime("%Y/%m/%d %H:%M:%S")
         ]
         ws.append_row(row, value_input_option="USER_ENTERED")
     except Exception as e:
@@ -72,36 +79,71 @@ def get_all_history(name):
         matched = [r for r in reversed(all_rows[1:]) if len(r) >= 5 and r[0] == name]
         result = []
         for r in matched[:10]:
-            try: items = json.loads(r[3])
-            except: items = {}
-            result.append({"name": r[0], "date": r[1], "author": r[2], "items": items, "progress": r[4]})
+            try:
+                items = json.loads(r[3])
+            except:
+                items = {}
+            result.append({
+                "name": r[0],
+                "date": r[1],
+                "author": r[2],
+                "items": items,
+                "progress": r[4]
+            })
         return result
-    except: return []
+    except:
+        return []
 
 def ensure_sheet_header():
     try:
         gc, _ = get_google_clients()
         sh = gc.open_by_key(SPREADSHEET_ID)
         ws = sh.worksheet("care_history")
-        if not ws.row_values(1):
+        first_row = ws.row_values(1)
+        if not first_row:
             ws.append_row(["氏名", "報告日", "作成者", "サービス項目(JSON)", "支援経過", "登録日時"])
-    except: pass
+    except:
+        pass
 
-# --- PDF作成 ---
+# --- PDF作成ロジック ---
 def create_styled_pdf_bytes(data):
     try:
         buffer = io.BytesIO()
-        doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=20*mm, leftMargin=20*mm, topMargin=15*mm, bottomMargin=15*mm)
+        doc = SimpleDocTemplate(buffer, pagesize=A4,
+                                rightMargin=20*mm, leftMargin=20*mm,
+                                topMargin=15*mm, bottomMargin=15*mm)
         elements = []
+
+        # スタイル定義
+        title_style  = ParagraphStyle(name='T', fontName=FONT_NAME, fontSize=24, alignment=1)
+        name_style   = ParagraphStyle(name='N', fontName=FONT_NAME, fontSize=18, leading=26)
         normal_style = ParagraphStyle(name='L', fontName=FONT_NAME, fontSize=13, leading=22)
-        elements.append(Paragraph(f"介護報告書 - {data['name']} 様", normal_style))
-        # （中略：本来は詳細なテーブル作成が入りますが動作確認用に簡略化。必要なら元のPDFロジックをここへ）
+        table_cell_style = ParagraphStyle(name='Cell', fontName=FONT_NAME, fontSize=12, leading=16)
+
+        elements.append(Paragraph("介護報告書", title_style))
         elements.append(Spacer(1, 10*mm))
-        elements.append(Paragraph(f"支援経過: {data['progress']}", normal_style))
+        elements.append(Paragraph(f"氏名： {data['name']} 様", name_style))
+        elements.append(Paragraph(f"報告日: {data['date']}", normal_style))
+        elements.append(Spacer(1, 10*mm))
+
+        # サービス項目テーブル
+        t_data = [[Paragraph("項目", table_cell_style), Paragraph("提供方法", table_cell_style), Paragraph("備考", table_cell_style)]]
+        for item, info in data['items'].items():
+            t_data.append([item, info['method'], info['note']])
+        
+        table = Table(t_data, colWidths=[40*mm, 40*mm, 90*mm])
+        table.setStyle(TableStyle([('GRID', (0,0), (-1,-1), 0.5, colors.black), ('BACKGROUND', (0,0), (-1,0), colors.whitesmoke)]))
+        elements.append(table)
+        
+        elements.append(Spacer(1, 10*mm))
+        elements.append(Paragraph("【支援経過】", normal_style))
+        elements.append(Paragraph(data['progress'].replace('\n', '<br/>'), normal_style))
+
         doc.build(elements)
         buffer.seek(0)
         return buffer.read(), None
-    except Exception as e: return None, str(e)
+    except Exception as e:
+        return None, str(e)
 
 # --- Drive保存 ---
 def upload_pdf_to_drive(filename, pdf_bytes):
@@ -109,41 +151,81 @@ def upload_pdf_to_drive(filename, pdf_bytes):
         _, drive_service = get_google_clients()
         file_metadata = {"name": filename, "parents": [DRIVE_FOLDER_ID]}
         media = MediaIoBaseUpload(io.BytesIO(pdf_bytes), mimetype="application/pdf")
-        uploaded = drive_service.files().create(body=file_metadata, media_body=media, fields="id, webViewLink", supportsAllDrives=True).execute()
+        uploaded = drive_service.files().create(
+            body=file_metadata,
+            media_body=media,
+            fields="id, webViewLink",
+            supportsAllDrives=True
+        ).execute()
         return uploaded.get("webViewLink"), None
-    except Exception as e: return None, str(e)
+    except Exception as e:
+        return None, str(e)
 
 # --- 認証機能 ---
 def check_password():
     if "password_correct" not in st.session_state:
         st.title("ログイン")
-        st.text_input("パスワードを入力", type="password", key="pw_input")
+        pw = st.text_input("パスワードを入力", type="password")
         if st.button("ログイン"):
-            if st.session_state["pw_input"] == PASSWORD:
+            if pw == PASSWORD:
                 st.session_state["password_correct"] = True
                 st.rerun()
-            else: st.error("パスワードが違います")
+            else:
+                st.error("パスワードが違います")
         return False
     return True
 
 # --- メイン UI ---
 if check_password():
     ensure_sheet_header()
+
+    with st.sidebar:
+        st.header("操作メニュー")
+        if st.button("🔄 リセット"):
+            for k in ["name_val", "prog_val", "author_val"]:
+                if k in st.session_state: st.session_state[k] = ""
+            st.rerun()
+
     st.title("📄 介護報告書 作成")
     
     with st.form("main_form"):
-        u_name = st.text_input("氏名", key="name_val")
-        a_name = st.text_input("作成者", key="author_val")
-        p_text = st.text_area("支援経過", key="prog_val")
-        submitted = st.form_submit_button("保存")
+        col1, col2 = st.columns(2)
+        with col1: u_name = st.text_input("氏名（利用者様）", key="name_val")
+        with col2: a_name = st.text_input("作成者", key="author_val")
+        r_date = st.date_input("報告日", datetime.now())
+        
+        st.divider()
+        items_list = ["健康管理", "入浴支援", "趣味活動推進", "口腔機能向上", "心身機能維持", "他者交流"]
+        results = {}
+        for item in items_list:
+            c_sel, c_note = st.columns([1, 1])
+            with c_sel: m = st.radio(item, ["通常提供", "積極提供", "本人に合わせる"], horizontal=True, key=f"r_{item}")
+            with c_note: n = st.text_input("備考", key=f"n_{item}")
+            results[item] = {"method": m, "note": n}
+
+        st.divider()
+        p_text = st.text_area("支援経過", height=200, key="prog_val")
+        submitted = st.form_submit_button("PDFを作成して保存", type="primary")
 
         if submitted:
-            report_data = {"name": u_name, "author": a_name, "date": datetime.now().strftime('%Y/%m/%d'), "items": {}, "progress": p_text}
-            pdf_bytes, err = create_styled_pdf_bytes(report_data)
-            if not err:
-                link, err2 = upload_pdf_to_drive(f"{u_name}.pdf", pdf_bytes)
-                if not err2:
-                    save_history(u_name, report_data)
-                    st.success("保存完了！")
-                    st.markdown(f"[Driveで見る]({link})")
-                else: st.error(err2)
+            if not u_name or not a_name:
+                st.error("氏名と作成者を入力してください")
+            else:
+                report_data = {
+                    "name": u_name, "author": a_name, 
+                    "date": r_date.strftime('%Y/%m/%d'), 
+                    "items": results, "progress": p_text
+                }
+                f_name = f"{u_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
+
+                with st.spinner("処理中..."):
+                    pdf_bytes, err = create_styled_pdf_bytes(report_data)
+                    if err:
+                        st.error(f"PDF作成失敗: {err}")
+                    else:
+                        link, err2 = upload_pdf_to_drive(f_name, pdf_bytes)
+                        save_history(u_name, report_data)
+                        st.success("✅ 保存が完了しました！")
+                        if link:
+                            st.markdown(f"[📂 Google Driveで開く]({link})")
+                        st.download_button("⬇️ PDFをダウンロード", data=pdf_bytes, file_name=f_name)
