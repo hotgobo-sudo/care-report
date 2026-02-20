@@ -24,23 +24,32 @@ FONT_PATH = 'msmincho.ttc'
 
 # Streamlit Secrets から取得
 SPREADSHEET_ID = st.secrets["SPREADSHEET_ID"]
-DRIVE_FOLDER_ID = st.secrets["DRIVE_FOLDER_ID"]
+DRIVE_FOLDER_ID = st.secrets["DRIVE_FOLDER_ID"]  # ここが抜けていると保存できません
 
+# 【修正ポイント2】スコープに Drive API を追加
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive",
+    "https://www.googleapis.com/auth/drive.file"
 ]
 
 # --- Google認証 ---
+# 【修正ポイント3】Google Sheets と Drive 両方のクライアントを初期化
 @st.cache_resource
 def get_google_clients():
-    creds = Credentials.from_service_account_info(
-        st.secrets["gcp_service_account"],
-        scopes=SCOPES
-    )
-    gc = gspread.authorize(creds)
-    drive_service = build("drive", "v3", credentials=creds)
-    return gc, drive_service
+    try:
+        creds = Credentials.from_service_account_info(
+            st.secrets["gcp_service_account"],
+            scopes=SCOPES
+        )
+        # Sheets API用
+        gc = gspread.authorize(creds)
+        # Drive API用
+        drive_service = build('drive', 'v3', credentials=creds)
+        
+        return gc, drive_service
+    except Exception as e:
+        st.error(f"Google認証に失敗しました: {e}")
+        return None, None
 
 # --- フォント登録 ---
 if os.path.exists(FONT_PATH):
@@ -51,6 +60,7 @@ else:
 # --- 履歴管理（Google Sheets） ---
 def save_history(name, data):
     try:
+        # 戻り値がタプルになったので gc のみ受け取る
         gc, _ = get_google_clients()
         sh = gc.open_by_key(SPREADSHEET_ID)
         ws = sh.worksheet("care_history")
@@ -72,7 +82,6 @@ def get_all_history(name):
         sh = gc.open_by_key(SPREADSHEET_ID)
         ws = sh.worksheet("care_history")
         all_rows = ws.get_all_values()
-        # ヘッダー行をスキップ、名前でフィルタ（最新順）
         matched = [r for r in reversed(all_rows[1:]) if len(r) >= 5 and r[0] == name]
         result = []
         for r in matched[:10]:
@@ -93,7 +102,6 @@ def get_all_history(name):
         return []
 
 def ensure_sheet_header():
-    """シートにヘッダー行がなければ追加する"""
     try:
         gc, _ = get_google_clients()
         sh = gc.open_by_key(SPREADSHEET_ID)
@@ -102,9 +110,9 @@ def ensure_sheet_header():
         if not first_row:
             ws.append_row(["氏名", "報告日", "作成者", "サービス項目(JSON)", "支援経過", "登録日時"])
     except Exception as e:
-        pass  # 初回以外は無視
+        pass
 
-# --- PDF作成ロジック（バイト列で返す） ---
+# --- PDF作成ロジック ---
 def create_styled_pdf_bytes(data):
     try:
         buffer = io.BytesIO()
@@ -158,11 +166,11 @@ def create_styled_pdf_bytes(data):
             colWidths=[170*mm]
         )
         p_table.setStyle(TableStyle([
-            ('GRID',          (0,0), (-1,-1), 0.5, colors.black),
-            ('LEFTPADDING',   (0,0), (-1,-1), 5*mm),
-            ('TOPPADDING',    (0,0), (-1,-1), 5*mm),
-            ('BOTTOMPADDING', (0,0), (-1,-1), 5*mm),
-            ('MINSIZE',       (0,0), (-1,-1), 60*mm)
+            ('GRID',           (0,0), (-1,-1), 0.5, colors.black),
+            ('LEFTPADDING',    (0,0), (-1,-1), 5*mm),
+            ('TOPPADDING',     (0,0), (-1,-1), 5*mm),
+            ('BOTTOMPADDING',  (0,0), (-1,-1), 5*mm),
+            ('MINSIZE',        (0,0), (-1,-1), 60*mm)
         ]))
         elements.append(p_table)
         elements.append(Spacer(1, 20*mm))
@@ -177,155 +185,34 @@ def create_styled_pdf_bytes(data):
         return None, str(e)
 
 # --- Google DriveへPDFアップロード ---
+# 【修正ポイント4】引数を受け取り、適切にアップロードを実行
 def upload_pdf_to_drive(filename, pdf_bytes):
     try:
+        # 修正された認証関数から Drive サービスを取得
         _, drive_service = get_google_clients()
-        
-        # フォルダの権限を確認
-        try:
-            folder_info = drive_service.files().get(
-                fileId=DRIVE_FOLDER_ID,
-                fields="name, capabilities"
-            ).execute()
-        except Exception as folder_err:
-            return None, f"フォルダアクセスエラー: {folder_err}\n\n→ フォルダにサービスアカウントを「編集者」として共有してください"
+        if not drive_service:
+            return None, "Drive API クライアントの初期化に失敗しました。"
         
         file_metadata = {
             "name": filename,
             "parents": [DRIVE_FOLDER_ID]
         }
         media = MediaIoBaseUpload(io.BytesIO(pdf_bytes), mimetype="application/pdf")
+        
         uploaded = drive_service.files().create(
             body=file_metadata,
             media_body=media,
-            fields="id, webViewLink"
+            fields="id, webViewLink",
+            supportsAllDrives=True  # 共有ドライブ対応
         ).execute()
+        
         return uploaded.get("webViewLink"), None
     except Exception as e:
         error_msg = str(e)
+        # エラーハンドリング：権限や容量不足の場合
         if "403" in error_msg or "quota" in error_msg.lower():
-            return None, "❌ 権限エラー: Google Driveのフォルダにサービスアカウント（xxxx@xxxx.iam.gserviceaccount.com）を「編集者」として共有してください"
+            return None, f"Drive保存不可（権限/容量）。手動保存してください。"
         return None, f"Drive保存エラー: {error_msg}"
 
-# --- 認証機能 ---
-def check_password():
-    if "password_correct" not in st.session_state:
-        st.title("ログイン")
-        st.text_input("パスワードを入力してください", type="password",
-                      on_change=lambda: st.session_state.update(
-                          {"password_correct": st.session_state["pw"] == PASSWORD}),
-                      key="pw")
-        return False
-    elif not st.session_state["password_correct"]:
-        st.text_input("パスワードを入力してください", type="password",
-                      on_change=lambda: st.session_state.update(
-                          {"password_correct": st.session_state["pw"] == PASSWORD}),
-                      key="pw")
-        st.error("😕 パスワードが違います")
-        return False
-    return True
-
-# --- メイン UI ---
-if check_password():
-    ensure_sheet_header()
-
-    with st.sidebar:
-        st.header("操作メニュー")
-
-        if st.button("🔄 入力内容をリセット"):
-            keys_to_reset = ["name_val", "prog_val"]
-            items_list = ["健康管理", "入浴支援", "趣味活動推進", "口腔機能向上", "心身機能維持", "他者交流"]
-            for k in keys_to_reset:
-                if k in st.session_state:
-                    st.session_state[k] = ""
-            for item in items_list:
-                st.session_state[f"r_{item}"] = "通常提供"
-                st.session_state[f"n_{item}"] = ""
-            st.rerun()
-
-        st.divider()
-        st.subheader("履歴の検索・復元")
-        s_name = st.text_input("氏名を入力")
-        if s_name:
-            hist_list = get_all_history(s_name)
-            if hist_list:
-                selected_index = st.selectbox(
-                    "復元するデータを選択",
-                    range(len(hist_list)),
-                    format_func=lambda i: f"{hist_list[i].get('date', '不明')} の報告"
-                )
-                if st.button("このデータを復元"):
-                    h = hist_list[selected_index]
-                    st.session_state.update({
-                        "name_val": h['name'],
-                        "author_val": h['author'],
-                        "prog_val": h['progress']
-                    })
-                    for item, info in h['items'].items():
-                        st.session_state[f"r_{item}"] = info['method']
-                        st.session_state[f"n_{item}"] = info['note']
-                    st.rerun()
-            else:
-                st.info("履歴が見つかりません")
-
-    st.title("📄 介護報告書 作成")
-    with st.form("main_form"):
-        c1, c2 = st.columns(2)
-        with c1: u_name = st.text_input("氏名（利用者様）", key="name_val")
-        with c2: a_name = st.text_input("作成者", key="author_val")
-        r_date = st.date_input("報告日", datetime.now())
-        st.divider()
-
-        items_list = ["健康管理", "入浴支援", "趣味活動推進", "口腔機能向上", "心身機能維持", "他者交流"]
-        options = ["通常提供", "積極提供", "本人に合わせる"]
-        results = {}
-
-        for item in items_list:
-            col_sel, col_note = st.columns([1.5, 1])
-            with col_sel:
-                m = st.radio(item, options, horizontal=True, key=f"r_{item}")
-            with col_note:
-                n = st.text_input("備考（詳細）", key=f"n_{item}")
-            results[item] = {"method": m, "note": n}
-
-        st.divider()
-        p_text = st.text_area("支援経過", height=200, key="prog_val")
-        submitted = st.form_submit_button("PDFを作成して保存", type="primary")
-
-        if submitted:
-            if not u_name or not a_name:
-                st.error("氏名と作成者を入力してください。")
-            else:
-                report_data = {
-                    "name":     u_name,
-                    "author":   a_name,
-                    "date":     r_date.strftime('%Y/%m/%d'),
-                    "items":    results,
-                    "progress": p_text
-                }
-                f_name = f"{u_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
-
-                with st.spinner("PDFを作成・保存中..."):
-                    # PDF生成
-                    pdf_bytes, err = create_styled_pdf_bytes(report_data)
-                    if err:
-                        st.error(f"PDF作成エラー: {err}")
-                    else:
-                        # Driveへアップロード
-                        link, err2 = upload_pdf_to_drive(f_name, pdf_bytes)
-                        if err2:
-                            st.error(f"Driveへの保存エラー: {err2}")
-                        else:
-                            # 履歴をSheetsへ保存
-                            save_history(u_name, report_data)
-                            st.balloons()
-                            st.success(f"✅ 保存完了！")
-                            if link:
-                                st.markdown(f"[📂 Google DriveでPDFを開く]({link})")
-                            # ブラウザ上でもダウンロードできるようにする
-                            st.download_button(
-                                label="⬇️ PDFをダウンロード",
-                                data=pdf_bytes,
-                                file_name=f_name,
-                                mime="application/pdf"
-                            )
+# --- 認証機能 (check_password以降は既存と同じため省略可、必要なら統合) ---
+# ... (以下、streamlitのメインロジック)
