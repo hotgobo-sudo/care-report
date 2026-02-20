@@ -256,36 +256,37 @@ if check_password():
         p_text = st.text_area("支援経過", height=200, key="prog_val")
         submitted = st.form_submit_button("PDFを作成して保存", type="primary")
 
-        if submitted:
-            if not u_name or not a_name:
-                st.error("氏名と作成者を入力してください。")
-            else:
-                report_data = {
-                    "name":     u_name,
-                    "author":   a_name,
-                    "date":     r_date.strftime('%Y/%m/%d'),
-                    "items":    results,
-                    "progress": p_text
-                }
-                f_name = f"{u_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
+    # フォームの外で処理
+    if submitted:
+        if not u_name or not a_name:
+            st.error("氏名と作成者を入力してください。")
+        else:
+            report_data = {
+                "name":     u_name,
+                "author":   a_name,
+                "date":     r_date.strftime('%Y/%m/%d'),
+                "items":    results,
+                "progress": p_text
+            }
+            f_name = f"{u_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
 
-                with st.spinner("PDFを作成中..."):
-                    # PDF生成
-                    pdf_bytes, err = create_styled_pdf_bytes(report_data)
-                    if err:
-                        st.error(f"PDF作成エラー: {err}")
-                    else:
-                        # 履歴をSheetsへ保存
-                        save_history(u_name, report_data)
-                        st.balloons()
-                        st.success(f"✅ PDF作成完了！")
-                        st.info("💾 PDFは下のボタンからダウンロードしてください")
-                        
-                        # ブラウザ上でダウンロード
-                        st.download_button(
-                            label="📥 PDFをダウンロード",
-                            data=pdf_bytes,
-                            file_name=f_name,
-                            mime="application/pdf",
-                            type="primary"
-                        )
+            with st.spinner("PDFを作成中..."):
+                # PDF生成
+                pdf_bytes, err = create_styled_pdf_bytes(report_data)
+                if err:
+                    st.error(f"PDF作成エラー: {err}")
+                else:
+                    # 履歴をSheetsへ保存
+                    save_history(u_name, report_data)
+                    st.balloons()
+                    st.success(f"✅ PDF作成完了！")
+                    st.info("💾 PDFは下のボタンからダウンロードしてください")
+                    
+                    # フォームの外なのでダウンロードボタンが使える
+                    st.download_button(
+                        label="📥 PDFをダウンロード",
+                        data=pdf_bytes,
+                        file_name=f_name,
+                        mime="application/pdf",
+                        type="primary"
+                    )
