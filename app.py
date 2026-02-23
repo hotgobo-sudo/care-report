@@ -55,7 +55,8 @@ def save_history(name, data):
             data["author"],
             json.dumps(data["items"], ensure_ascii=False),
             data["progress"],
-            datetime.now().strftime("%Y/%m/%d %H:%M:%S")
+            datetime.now().strftime("%Y/%m/%d %H:%M:%S"),
+            "未出力"  # PDF出力ステータス
         ]
         ws.append_row(row, value_input_option="USER_ENTERED")
     except Exception as e:
@@ -95,7 +96,7 @@ def ensure_sheet_header():
         ws = sh.worksheet("care_history")
         first_row = ws.row_values(1)
         if not first_row:
-            ws.append_row(["氏名", "報告日", "作成者", "サービス項目(JSON)", "支援経過", "登録日時"])
+            ws.append_row(["氏名", "報告日", "作成者", "サービス項目(JSON)", "支援経過", "登録日時", "PDF出力状況"])
     except Exception as e:
         pass  # 初回以外は無視
 
@@ -254,9 +255,8 @@ if check_password():
 
         st.divider()
         p_text = st.text_area("支援経過", height=200, key="prog_val")
-        submitted = st.form_submit_button("PDFを作成して保存", type="primary")
+        submitted = st.form_submit_button("送信して保存", type="primary")
 
-    # フォームの外で処理
     if submitted:
         if not u_name or not a_name:
             st.error("氏名と作成者を入力してください。")
@@ -268,25 +268,7 @@ if check_password():
                 "items":    results,
                 "progress": p_text
             }
-            f_name = f"{u_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
-
-            with st.spinner("PDFを作成中..."):
-                # PDF生成
-                pdf_bytes, err = create_styled_pdf_bytes(report_data)
-                if err:
-                    st.error(f"PDF作成エラー: {err}")
-                else:
-                    # 履歴をSheetsへ保存
-                    save_history(u_name, report_data)
-                    st.balloons()
-                    st.success(f"✅ PDF作成完了！")
-                    st.info("💾 PDFは下のボタンからダウンロードしてください")
-                    
-                    # フォームの外なのでダウンロードボタンが使える
-                    st.download_button(
-                        label="📥 PDFをダウンロード",
-                        data=pdf_bytes,
-                        file_name=f_name,
-                        mime="application/pdf",
-                        type="primary"
-                    )
+            with st.spinner("保存中..."):
+                save_history(u_name, report_data)
+                st.balloons()
+                st.success("✅ 送信完了！会社PCで一括PDF出力されます。")
